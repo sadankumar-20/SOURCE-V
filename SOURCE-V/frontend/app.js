@@ -1,511 +1,480 @@
-// =========================
-// GLOBALS
-// =========================
-var radarChart = null;
+const API_BASE_URL = '';  // Relative URLs — backend serves this frontend
+let radarChart = null;
 let filesScannedCount = 0;
 let threatsInterceptedCount = 0;
-let verificationCount = 0;
+let verificationsCount = 0;
+const scanLog = [];       // { name, verdict, threat }
+const threatLog = [];     // { name, threat, score }
+const chainLog = [];      // { name, hash }
 
-const scanLog = [];
-const threatLog = [];
-const chainLog = [];
+// ---- MODALS ----
+function openModal(id) {
+    // Sync live counts
+    document.getElementById('modal-scan-count').innerText = filesScannedCount;
+    document.getElementById('modal-threat-count').innerText = threatsInterceptedCount;
+    document.getElementById('modal-chain-count').innerText = verificationsCount;
 
-// =========================
-// INIT
-// =========================
+    // Render logs
+    renderLog('modal-scan-log', scanLog, (e) =>
+        `<span><i class="fa-solid fa-file" style="color:var(--accent-primary);margin-right:6px"></i>${e.name}</span><span class="threat-badge ${e.threat}" style="font-size:0.75rem;padding:3px 8px">${e.verdict}</span>`
+    );
+    renderLog('modal-threat-log', threatLog, (e) =>
+        `<span><i class="fa-solid fa-triangle-exclamation" style="color:var(--danger);margin-right:6px"></i>${e.name}</span><span class="threat-badge ${e.threat}" style="font-size:0.75rem;padding:3px 8px">${e.threat}</span>`
+    );
+    renderLog('modal-chain-log', chainLog, (e) =>
+        `<span><i class="fa-solid fa-lock" style="color:var(--accent-secondary);margin-right:6px"></i>${e.name}</span><span style="font-family:monospace;font-size:0.72rem;color:var(--text-secondary)">${e.hash.substring(0,16)}...</span>`
+    );
+
+    document.getElementById(id).classList.add('open');
+}
+
+function closeModal(id) {
+    document.getElementById(id).classList.remove('open');
+}
+
+function renderLog(containerId, data, rowFn) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (data.length === 0) {
+        el.innerHTML = '<div class="modal-log-empty">No records yet this session.</div>';
+    } else {
+        el.innerHTML = [...data].reverse().map(e =>
+            `<div class="modal-log-entry">${rowFn(e)}</div>`
+        ).join('');
+    }
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        ['modal-scanned','modal-threats','modal-chain'].forEach(id => closeModal(id));
+    }
+});
+
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("✅ JS LOADED");
     setupNavigation();
+    setupWallet();
     setupScanner();
     setupVerifier();
     setupSimulator();
-    setupWallet();
+    initParticles();
 });
 
-// =========================
-// NAVIGATION
-// =========================
-function setupNavigation() {
-    const navItems = document.querySelectorAll('.nav-links li');
-    const sections = document.querySelectorAll('.page-section');
+// ---- PARTICLES ----
+function initParticles() {
+    const canvas = document.getElementById('particles-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
 
-    const titleMap = {
-        dashboard: { title: 'Dashboard Overview', sub: 'Real-time AI threat analysis and blockchain integrity' },
-        scanner: { title: 'Deepfake Media Scanner', sub: 'Upload media for multi-modal AI ensemble analysis' },
-        verifier: { title: 'Blockchain Integrity Verifier', sub: 'Tamper-proof cryptographic hash generation' },
-        simulator: { title: 'Adversarial Threat Simulator', sub: 'FGSM/PGD predictive attack modeling engine' }
+    const particles = Array.from({ length: 60 }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        vx: (Math.random() - 0.5) * 0.4,
+        vy: (Math.random() - 0.5) * 0.4,
+        r: Math.random() * 1.5 + 0.5,
+        alpha: Math.random() * 0.5 + 0.1,
+    }));
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        particles.forEach(p => {
+            p.x += p.vx; p.y += p.vy;
+            if (p.x < 0) p.x = canvas.width;
+            if (p.x > canvas.width) p.x = 0;
+            if (p.y < 0) p.y = canvas.height;
+            if (p.y > canvas.height) p.y = 0;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(139, 92, 246, ${p.alpha})`;
+            ctx.fill();
+        });
+        // Draw lines between nearby particles
+        for (let i = 0; i < particles.length; i++) {
+            for (let j = i + 1; j < particles.length; j++) {
+                const dx = particles[i].x - particles[j].x;
+                const dy = particles[i].y - particles[j].y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 120) {
+                    ctx.beginPath();
+                    ctx.moveTo(particles[i].x, particles[i].y);
+                    ctx.lineTo(particles[j].x, particles[j].y);
+                    ctx.strokeStyle = `rgba(139, 92, 246, ${0.1 * (1 - dist / 120)})`;
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+                }
+            }
+        }
+        requestAnimationFrame(draw);
+    }
+    draw();
+}
+
+// ---- NAVIGATION ----
+function setupNavigation() {
+    const navLinks = document.querySelectorAll('.nav-links li');
+    const sections = document.querySelectorAll('.page-section');
+    const pageTitle = document.getElementById('page-title');
+    const pageSub = document.getElementById('page-subtitle');
+
+    const meta = {
+        'dashboard': ['Dashboard Overview', 'Real-time AI threat analysis and blockchain integrity'],
+        'scanner': ['Deepfake Media Scanner', 'Multi-modal AI ensemble — 5 detection modules + score fusion'],
+        'verifier': ['Blockchain Integrity Verifier', 'Tamper-proof cryptographic hash & IPFS forensic ledger'],
+        'simulator': ['Adversarial Threat Simulator', 'FGSM/PGD proactive threat modeling & attack prediction'],
     };
 
-    navItems.forEach(item => {
-        item.addEventListener('click', () => {
-            const target = item.dataset.target;
-            navItems.forEach(i => i.classList.remove('active'));
+    navLinks.forEach(link => {
+        link.addEventListener('click', () => {
+            navLinks.forEach(l => l.classList.remove('active'));
+            link.classList.add('active');
+            const id = link.getAttribute('data-target');
             sections.forEach(s => s.classList.remove('active'));
-            item.classList.add('active');
-            const section = document.getElementById(target);
-            if (section) section.classList.add('active');
-
-            const info = titleMap[target];
-            if (info) {
-                document.getElementById('page-title').textContent = info.title;
-                document.getElementById('page-subtitle').textContent = info.sub;
-            }
+            document.getElementById(id).classList.add('active');
+            if (meta[id]) { pageTitle.innerText = meta[id][0]; pageSub.innerText = meta[id][1]; }
         });
     });
 }
 
-// =========================
-// SCANNER
-// =========================
+// ---- WALLET ----
+function setupWallet() {
+    const btn = document.getElementById('connect-wallet-btn');
+    const walletDiv = document.getElementById('wallet-connected');
+    const addrSpan = document.getElementById('wallet-address');
+    const netInfo = document.getElementById('network-info');
+    const netName = document.getElementById('network-name');
+
+    if (!btn) return;
+
+    btn.addEventListener('click', async () => {
+        if (typeof window.ethereum !== 'undefined') {
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                const account = accounts[0];
+                
+                // Get network info
+                const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+                const networkMap = { '0x539': 'Ganache Local', '0x1': 'Ethereum Mainnet', '0x5': 'Goerli Testnet', '0xaa36a7': 'Sepolia' };
+                
+                btn.style.display = 'none';
+                walletDiv.style.display = 'flex';
+                addrSpan.innerText = `${account.substring(0, 6)}...${account.substring(account.length - 4)}`;
+
+                netInfo.style.display = 'flex';
+                netName.innerText = networkMap[chainId] || `Chain ${parseInt(chainId, 16)}`;
+
+            } catch (err) {
+                console.error('Wallet error:', err);
+            }
+        } else {
+            alert('MetaMask not detected! Please install MetaMask and connect it to your Ganache network first.');
+        }
+    });
+}
+
+// ---- UTILITIES ----
+function setupDropzone(dropzoneId, fileInputId, callback) {
+    const zone = document.getElementById(dropzoneId);
+    const input = document.getElementById(fileInputId);
+
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(e => zone.addEventListener(e, ev => { ev.preventDefault(); ev.stopPropagation(); }));
+    ['dragenter', 'dragover'].forEach(e => zone.addEventListener(e, () => zone.classList.add('dragover')));
+    ['dragleave', 'drop'].forEach(e => zone.addEventListener(e, () => zone.classList.remove('dragover')));
+    zone.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) callback(f); });
+    input.addEventListener('change', function () { if (this.files[0]) callback(this.files[0]); });
+}
+
+function setModuleBar(barId, pctId, score) {
+    const pct = (score * 100).toFixed(1);
+    const bar = document.getElementById(barId);
+    const el = document.getElementById(pctId);
+    el.innerText = pct + '%';
+    setTimeout(() => {
+        bar.style.width = pct + '%';
+        bar.className = 'module-bar' + (score > 0.6 ? ' danger' : '');
+    }, 100);
+}
+
+function updateDashboard(threatLevel, fileName, verdict, sha256) {
+    filesScannedCount++;
+    document.getElementById('stat-files-scanned').innerText = filesScannedCount;
+    scanLog.push({ name: fileName, verdict, threat: threatLevel });
+
+    if (threatLevel === 'HIGH' || threatLevel === 'MEDIUM') {
+        threatsInterceptedCount++;
+        document.getElementById('stat-threats-intercepted').innerText = threatsInterceptedCount;
+        threatLog.push({ name: fileName, threat: threatLevel });
+    }
+    verificationsCount++;
+    document.getElementById('stat-verifications').innerText = verificationsCount;
+    if (sha256) chainLog.push({ name: fileName, hash: sha256 });
+}
+
+// ---- RADAR CHART ----
+function drawRadar(breakdown) {
+    const ctx = document.getElementById('radarChart').getContext('2d');
+    const data = [breakdown.gaze, breakdown.lip_sync, breakdown.voice, breakdown.emotion, breakdown.behavioral].map(v => v * 100);
+
+    if (radarChart) radarChart.destroy();
+    radarChart = new Chart(ctx, {
+        type: 'radar',
+        data: {
+            labels: ['Gaze', 'Lip Sync', 'Voice', 'Emotion', 'Behavioral'],
+            datasets: [{
+                label: 'Fake Confidence %',
+                data,
+                backgroundColor: 'rgba(139, 92, 246, 0.2)',
+                borderColor: 'rgba(139, 92, 246, 0.9)',
+                pointBackgroundColor: '#06b6d4',
+                pointBorderColor: '#06b6d4',
+                pointRadius: 5,
+                borderWidth: 2,
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                r: {
+                    min: 0, max: 100,
+                    ticks: { color: '#64748b', stepSize: 25, font: { size: 10 } },
+                    grid: { color: 'rgba(255,255,255,0.06)' },
+                    pointLabels: { color: '#94a3b8', font: { size: 12, family: 'Inter' } },
+                    angleLines: { color: 'rgba(255,255,255,0.06)' },
+                }
+            },
+            plugins: { legend: { display: false } }
+        }
+    });
+}
+
+// Loading step cycling
+const loadingSteps = [
+    'Initializing neural pipeline...',
+    'Running OpenCV preprocessing...',
+    'Analyzing gaze vectors (CNN/LSTM)...',
+    'Detecting lip-sync anomalies...',
+    'Processing voice MFCC spectrogram...',
+    'Evaluating emotion action units...',
+    'Behavioral temporal analysis...',
+    'Running score fusion ensemble...',
+    'Generating blockchain proof...',
+];
+
+function cycleLoadingText(elId) {
+    let i = 0;
+    const el = document.getElementById(elId);
+    return setInterval(() => {
+        if (el) el.innerText = loadingSteps[i % loadingSteps.length];
+        i++;
+    }, 900);
+}
+
+// ---- MEDIA PREVIEW RENDERER ----
+function renderMediaPreview(wrapperId, metaId, file, verdict = null) {
+    const wrapper = document.getElementById(wrapperId);
+    const meta = document.getElementById(metaId);
+    if (!wrapper) return;
+
+    if (wrapper.dataset.objectUrl) {
+        URL.revokeObjectURL(wrapper.dataset.objectUrl);
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    wrapper.dataset.objectUrl = objectUrl;
+
+    const fileType = file.type || '';
+    const fileName = file.name || 'Uploaded File';
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    const ext = fileName.split('.').pop().toLowerCase();
+
+    if (meta) {
+        meta.innerHTML = `<span class="media-type-badge">${ext.toUpperCase()}</span> <span class="media-size">${fileSizeMB} MB</span>`;
+    }
+
+    let borderClass = 'preview-border-default';
+    if (verdict === 'FAKE') borderClass = 'preview-border-fake';
+    else if (verdict === 'REAL') borderClass = 'preview-border-real';
+
+    if (fileType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext)) {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass}">
+                <img src="${objectUrl}" alt="${fileName}" class="preview-media-img" />
+                <div class="media-overlay-badge"><i class="fa-solid fa-image"></i> ${fileName}</div>
+            </div>
+        `;
+    } else if (fileType.startsWith('video/') || ['mp4', 'webm', 'mov', 'avi', 'mkv'].includes(ext)) {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass}">
+                <video src="${objectUrl}" controls autoplay muted loop class="preview-media-video"></video>
+                <div class="media-overlay-badge"><i class="fa-solid fa-video"></i> ${fileName}</div>
+            </div>
+        `;
+    } else if (fileType.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'aac'].includes(ext)) {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass} audio-wrapper">
+                <div class="audio-visual-icon"><i class="fa-solid fa-music"></i></div>
+                <div class="audio-info">
+                    <div class="audio-filename">${fileName}</div>
+                    <audio src="${objectUrl}" controls class="preview-media-audio"></audio>
+                </div>
+            </div>
+        `;
+    } else {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass}">
+                <div class="generic-file-preview"><i class="fa-solid fa-file"></i> ${fileName}</div>
+            </div>
+        `;
+    }
+}
+
+// ---- SCANNER ----
 function setupScanner() {
     const loading = document.getElementById('scanner-loading');
     const results = document.getElementById('scanner-results');
     const dropzone = document.getElementById('scanner-dropzone');
-    const fileInput = document.getElementById('scanner-file');
 
-    if (!dropzone || !fileInput) {
-        console.error("❌ Scanner dropzone or file input missing");
-        return;
-    }
-
-    // Browse button
-    const browseBtn = document.getElementById('scanner-browse-btn') || dropzone.querySelector("button");
-    if (browseBtn) {
-        browseBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            fileInput.click();
-        });
-    }
-
-    // Drag & Drop
-    dropzone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropzone.classList.add("hover");
-    });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove("hover"));
-    dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove("hover");
-        const file = e.dataTransfer.files[0];
-        if (file) handleScanFile(file);
-    });
-
-    // File input change
-    fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
-        if (file) handleScanFile(file);
-        fileInput.value = ''; // reset so same file can be re-selected
-    });
-
-    async function handleScanFile(file) {
-        console.log("📁 Scanner file:", file.name);
+    setupDropzone('scanner-dropzone', 'scanner-file', async (file) => {
         results.classList.add('hidden');
         loading.classList.remove('hidden');
-        animateLoadingSteps('loading-step');
+        dropzone.classList.add('scanning');
+        const cycleTimer = cycleLoadingText('loading-step');
 
         const formData = new FormData();
-        formData.append('file', file); // backend expects 'file' field
+        formData.append('file', file);
 
         try {
-            // Correct endpoint: /upload-media
-            const response = await fetch('/upload-media', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) {
-                throw new Error(`Server error: ${response.status} ${response.statusText}`);
-            }
-
+            const response = await fetch(`${API_BASE_URL}/upload-media`, { method: 'POST', body: formData });
+            clearInterval(cycleTimer);
+            if (!response.ok) throw new Error('API Error');
             const data = await response.json();
-            console.log("✅ API RESULT:", data);
-            updateScanUI(data, file);
+
+            // Verdict banner
+            const banner = document.getElementById('verdict-banner');
+            const verdictEl = document.getElementById('res-scan-verdict');
+            const verdictIcon = document.getElementById('verdict-icon');
+
+            banner.className = 'verdict-banner ' + (data.detection_verdict === 'FAKE' ? 'fake' : 'real');
+            verdictEl.className = 'verdict-value ' + (data.detection_verdict === 'FAKE' ? 'fake' : 'real');
+            verdictEl.innerText = data.detection_verdict;
+            verdictIcon.innerHTML = data.detection_verdict === 'FAKE'
+                ? '<i class="fa-solid fa-circle-xmark" style="color:#ef4444;font-size:2.5rem;filter:drop-shadow(0 0 12px rgba(239,68,68,0.6))"></i>'
+                : '<i class="fa-solid fa-circle-check" style="color:#10b981;font-size:2.5rem;filter:drop-shadow(0 0 12px rgba(16,185,129,0.6))"></i>';
+
+            // Score
+            document.getElementById('res-scan-score').innerText = (data.fake_score * 100).toFixed(1) + '%';
+
+            // Threat badge
+            const tb = document.getElementById('res-scan-threat');
+            tb.innerText = data.threat_prediction;
+            tb.className = 'threat-badge ' + data.threat_prediction;
+
+            // Media Visual Preview
+            renderMediaPreview('scanner-media-wrapper', 'scanner-media-meta', file, data.detection_verdict);
+
+            // Module breakdown bars
+            setModuleBar('bar-gaze', 'res-gaze', data.breakdown.gaze);
+            setModuleBar('bar-lipsync', 'res-lipsync', data.breakdown.lip_sync);
+            setModuleBar('bar-voice', 'res-voice', data.breakdown.voice);
+            setModuleBar('bar-emotion', 'res-emotion', data.breakdown.emotion);
+            setModuleBar('bar-behavioral', 'res-behavioral', data.breakdown.behavioral);
+
+            // Radar chart
+            drawRadar(data.breakdown);
+
+            // Hashes
+            document.getElementById('res-scan-filename').innerText = data.file_name;
+            document.getElementById('res-scan-size').innerText = data.file_size_mb;
+            document.getElementById('res-scan-hash').innerText = data.sha256_hash;
+            document.getElementById('res-scan-phash').innerText = data.perceptual_hash || 'N/A';
+            document.getElementById('res-scan-ipfs').innerText = data.ipfs_cid || 'N/A';
+
+            updateDashboard(data.threat_prediction, data.file_name, data.detection_verdict, data.sha256_hash);
+
+            dropzone.classList.remove('scanning');
+            loading.classList.add('hidden');
+            results.classList.remove('hidden');
 
         } catch (err) {
-            console.error("❌ ERROR:", err);
-            alert(`Backend connection failed.\n\nMake sure the server is running:\n  python main.py\n\nError: ${err.message}`);
+            clearInterval(cycleTimer);
+            dropzone.classList.remove('scanning');
+            loading.classList.add('hidden');
+            console.error(err);
+            alert('Analysis failed. Make sure the backend is running:\n  python main.py\n\nError: ' + err.message);
         }
-
-        loading.classList.add('hidden');
-        results.classList.remove('hidden');
-    }
+    });
 }
 
-// =========================
-// SCANNER UI UPDATE
-// =========================
-function updateScanUI(data, file) {
-    // Map backend fields correctly
-    // Backend returns: detection_verdict, fake_score, breakdown, sha256_hash, perceptual_hash, ipfs_cid, file_size_mb
-    const verdict = data.detection_verdict || data.verdict || "UNKNOWN";
-    const score = data.fake_score ?? data.final_score ?? 0;
-    const breakdown = data.breakdown || {};
-    const moduleScores = {
-        gaze: breakdown.gaze ?? 0,
-        lip_sync: breakdown.lip_sync ?? 0,
-        voice: breakdown.voice ?? 0,
-        emotion: breakdown.emotion ?? 0,
-        behavioral: breakdown.behavioral ?? 0.5
-    };
-
-    const threat = verdict === "FAKE" ? "HIGH" : verdict === "REAL" ? "LOW" : "MEDIUM";
-
-    // Verdict banner
-    document.getElementById('res-scan-verdict').innerText = verdict;
-    document.getElementById('res-scan-score').innerText = (score * 100).toFixed(1) + '%';
-    document.getElementById('res-scan-threat').innerText = threat;
-
-    // Threat badge color
-    const threatBadge = document.getElementById('res-scan-threat');
-    threatBadge.className = 'threat-badge';
-    if (threat === 'HIGH') threatBadge.classList.add('high');
-    else if (threat === 'MEDIUM') threatBadge.classList.add('medium');
-    else threatBadge.classList.add('low');
-
-    // Verdict banner color
-    const verdictBanner = document.getElementById('verdict-banner');
-    if (verdictBanner) {
-        verdictBanner.className = 'verdict-banner';
-        if (verdict === 'FAKE') verdictBanner.classList.add('fake');
-        else if (verdict === 'REAL') verdictBanner.classList.add('real');
-    }
-
-    // Forensic ledger fields
-    document.getElementById('res-scan-filename').innerText = file.name;
-    document.getElementById('res-scan-size').innerText = data.file_size_mb?.toFixed(2) ?? (file.size / 1048576).toFixed(2);
-    document.getElementById('res-scan-hash').innerText = data.sha256_hash || '-';
-    document.getElementById('res-scan-phash').innerText = data.perceptual_hash || '-';
-    document.getElementById('res-scan-ipfs').innerText = data.ipfs_cid || '-';
-
-    // Module bars
-    setModuleBar('bar-gaze', 'res-gaze', moduleScores.gaze);
-    setModuleBar('bar-lipsync', 'res-lipsync', moduleScores.lip_sync);
-    setModuleBar('bar-voice', 'res-voice', moduleScores.voice);
-    setModuleBar('bar-emotion', 'res-emotion', moduleScores.emotion);
-    setModuleBar('bar-behavioral', 'res-behavioral', moduleScores.behavioral);
-
-    drawRadar(moduleScores);
-    updateDashboard(threat, file.name, verdict, score, data);
-}
-
-// =========================
-// VERIFIER
-// =========================
+// ---- VERIFIER ----
 function setupVerifier() {
     const loading = document.getElementById('verifier-loading');
     const results = document.getElementById('verifier-results');
-    const dropzone = document.getElementById('verifier-dropzone');
-    const fileInput = document.getElementById('verifier-file');
 
-    if (!dropzone || !fileInput) {
-        console.error("❌ Verifier dropzone or file input missing");
-        return;
-    }
-
-    const btn = dropzone.querySelector('button');
-    if (btn) {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            fileInput.click();
-        });
-    }
-
-    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('hover'); });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('hover'));
-    dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('hover');
-        const file = e.dataTransfer.files[0];
-        if (file) handleVerifyFile(file);
-    });
-
-    fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
-        if (file) handleVerifyFile(file);
-        fileInput.value = '';
-    });
-
-    async function handleVerifyFile(file) {
-        console.log("🔗 Verifier file:", file.name);
+    setupDropzone('verifier-dropzone', 'verifier-file', async (file) => {
         results.classList.add('hidden');
         loading.classList.remove('hidden');
-
         const formData = new FormData();
         formData.append('file', file);
-
         try {
-            const response = await fetch('/verify-hash', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) throw new Error(`Server error: ${response.status}`);
-
+            const response = await fetch(`${API_BASE_URL}/verify-hash`, { method: 'POST', body: formData });
+            if (!response.ok) throw new Error('API Error');
             const data = await response.json();
-            console.log("✅ Verifier result:", data);
+            document.getElementById('res-verify-hash').innerText = data.sha256_hash;
+            document.getElementById('res-verify-phash').innerText = data.perceptual_hash || 'N/A';
 
-            document.getElementById('res-verify-hash').innerText = data.sha256_hash || '-';
-            document.getElementById('res-verify-phash').innerText = data.perceptual_hash || '-';
+            // Media Visual Preview
+            renderMediaPreview('verifier-media-wrapper', 'verifier-media-meta', file);
 
-            // Update blockchain verification count
-            verificationCount++;
-            document.getElementById('stat-verifications').innerText = verificationCount;
-            const modalCount = document.getElementById('modal-chain-count');
-            if (modalCount) modalCount.innerText = verificationCount;
-
-            const now = new Date().toLocaleTimeString();
-            chainLog.unshift({ name: file.name, time: now });
-            renderLog('modal-chain-log', chainLog, 'green');
-
+            verificationsCount++;
+            document.getElementById('stat-verifications').innerText = verificationsCount;
+            loading.classList.add('hidden');
+            results.classList.remove('hidden');
         } catch (err) {
-            console.error("❌ Verifier error:", err);
-            alert(`Verification failed.\n\nError: ${err.message}`);
+            loading.classList.add('hidden');
+            console.error(err);
+            alert('Verification failed.');
         }
-
-        loading.classList.add('hidden');
-        results.classList.remove('hidden');
-    }
+    });
 }
 
-// =========================
-// SIMULATOR
-// =========================
+// ---- SIMULATOR ----
 function setupSimulator() {
     const loading = document.getElementById('simulator-loading');
     const results = document.getElementById('simulator-results');
-    const dropzone = document.getElementById('simulator-dropzone');
-    const fileInput = document.getElementById('simulator-file');
 
-    if (!dropzone || !fileInput) {
-        console.error("❌ Simulator dropzone or file input missing");
-        return;
-    }
-
-    const btn = dropzone.querySelector('button');
-    if (btn) {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            fileInput.click();
-        });
-    }
-
-    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('hover'); });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('hover'));
-    dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('hover');
-        const file = e.dataTransfer.files[0];
-        if (file) handleSimFile(file);
-    });
-
-    fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
-        if (file) handleSimFile(file);
-        fileInput.value = '';
-    });
-
-    async function handleSimFile(file) {
-        console.log("⚡ Simulator file:", file.name);
+    setupDropzone('simulator-dropzone', 'simulator-file', async (file) => {
         results.classList.add('hidden');
         loading.classList.remove('hidden');
-
+        document.getElementById('res-sim-confidence-bar').style.width = '0%';
         const formData = new FormData();
         formData.append('file', file);
-
         try {
-            const response = await fetch('/predict-future-attack', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) throw new Error(`Server error: ${response.status}`);
-
+            const response = await fetch(`${API_BASE_URL}/predict-future-attack`, { method: 'POST', body: formData });
+            if (!response.ok) throw new Error('API Error');
             const data = await response.json();
-            console.log("✅ Simulator result:", data);
 
-            document.getElementById('res-sim-risk').innerText = data.future_attack_risk || '-';
-            document.getElementById('res-sim-type').innerText = data.predicted_attack_type || '-';
+            const rb = document.getElementById('res-sim-risk');
+            rb.innerText = data.future_attack_risk;
+            rb.className = 'threat-badge ' + data.future_attack_risk;
+            document.getElementById('res-sim-type').innerText = data.predicted_attack_type;
 
-            const confidence = (data.confidence || 0) * 100;
-            const bar = document.getElementById('res-sim-confidence-bar');
-            const txt = document.getElementById('res-sim-confidence-text');
-            if (bar) bar.style.width = confidence.toFixed(1) + '%';
-            if (txt) txt.innerText = confidence.toFixed(1) + '%';
+            // Media Visual Preview
+            renderMediaPreview('simulator-media-wrapper', 'simulator-media-meta', file, data.future_attack_risk === 'HIGH' ? 'FAKE' : 'REAL');
 
-            // Color risk badge
-            const riskBadge = document.getElementById('res-sim-risk');
-            if (riskBadge) {
-                riskBadge.className = 'threat-badge';
-                const r = data.future_attack_risk;
-                if (r === 'HIGH') riskBadge.classList.add('high');
-                else if (r === 'MEDIUM') riskBadge.classList.add('medium');
-                else riskBadge.classList.add('low');
-            }
+            setTimeout(() => {
+                const pct = (data.confidence * 100).toFixed(1);
+                document.getElementById('res-sim-confidence-bar').style.width = pct + '%';
+                document.getElementById('res-sim-confidence-text').innerText = pct + '% prediction certainty';
+            }, 150);
 
+            loading.classList.add('hidden');
+            results.classList.remove('hidden');
         } catch (err) {
-            console.error("❌ Simulator error:", err);
-            alert(`Simulation failed.\n\nError: ${err.message}`);
-        }
-
-        loading.classList.add('hidden');
-        results.classList.remove('hidden');
-    }
-}
-
-// =========================
-// WALLET (MetaMask)
-// =========================
-function setupWallet() {
-    const btn = document.getElementById('connect-wallet-btn');
-    if (!btn) return;
-
-    btn.addEventListener('click', async () => {
-        if (typeof window.ethereum === 'undefined') {
-            alert('MetaMask is not installed. Please install it from metamask.io');
-            return;
-        }
-        try {
-            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-            const addr = accounts[0];
-            const short = addr.slice(0, 6) + '...' + addr.slice(-4);
-
-            document.getElementById('connect-wallet-btn').style.display = 'none';
-            const connected = document.getElementById('wallet-connected');
-            const addrEl = document.getElementById('wallet-address');
-            const netEl = document.getElementById('network-info');
-            if (connected) connected.style.display = 'flex';
-            if (addrEl) addrEl.innerText = short;
-            if (netEl) netEl.style.display = 'flex';
-
-        } catch (err) {
-            console.error("❌ MetaMask:", err);
+            loading.classList.add('hidden');
+            console.error(err);
+            alert('Simulation failed.');
         }
     });
 }
 
-// =========================
-// HELPERS
-// =========================
-function setModuleBar(barId, pctId, score) {
-    const pct = (score * 100).toFixed(1);
-    const pctEl = document.getElementById(pctId);
-    const barEl = document.getElementById(barId);
-    if (pctEl) pctEl.innerText = pct + '%';
-    if (barEl) barEl.style.width = pct + '%';
-}
-
-function updateDashboard(threat, fileName, verdict, score, data) {
-    filesScannedCount++;
-    if (threat !== 'LOW') threatsInterceptedCount++;
-
-    document.getElementById('stat-files-scanned').innerText = filesScannedCount;
-    document.getElementById('stat-threats-intercepted').innerText = threatsInterceptedCount;
-
-    const modalScan = document.getElementById('modal-scan-count');
-    const modalThreat = document.getElementById('modal-threat-count');
-    if (modalScan) modalScan.innerText = filesScannedCount;
-    if (modalThreat) modalThreat.innerText = threatsInterceptedCount;
-
-    const now = new Date().toLocaleTimeString();
-    const entry = { name: fileName, verdict, score: (score * 100).toFixed(1), time: now };
-    scanLog.unshift(entry);
-    if (threat !== 'LOW') threatLog.unshift(entry);
-
-    renderLog('modal-scan-log', scanLog, verdict === 'FAKE' ? 'red' : 'green');
-    renderLog('modal-threat-log', threatLog, 'red');
-
-    // Also log blockchain
-    verificationCount++;
-    document.getElementById('stat-verifications').innerText = verificationCount;
-    const chainCount = document.getElementById('modal-chain-count');
-    if (chainCount) chainCount.innerText = verificationCount;
-
-    if (data) {
-        chainLog.unshift({ name: fileName, time: now, cid: data.ipfs_cid });
-        renderLog('modal-chain-log', chainLog, 'green');
-    }
-}
-
-function renderLog(containerId, log, color) {
-    const el = document.getElementById(containerId);
-    if (!el) return;
-    if (log.length === 0) {
-        el.innerHTML = '<div class="log-empty">No records yet.</div>';
-        return;
-    }
-    el.innerHTML = log.slice(0, 10).map(e =>
-        `<div class="log-entry" style="border-left: 3px solid var(--accent-${color === 'red' ? 'danger' : 'primary'});">
-            <span class="log-name">${e.name}</span>
-            <span class="log-meta">${e.verdict ? `${e.verdict} · ${e.score}%` : (e.cid ? e.cid.slice(0, 20) + '…' : '')} · ${e.time}</span>
-        </div>`
-    ).join('');
-}
-
-function animateLoadingSteps(elementId) {
-    const steps = [
-        'Initializing neural pipeline...',
-        'Extracting visual frames...',
-        'Running Gaze & Lip Sync analysis...',
-        'Processing Voice & Emotion modules...',
-        'Fusing ensemble scores...',
-        'Generating blockchain forensics...'
-    ];
-    const el = document.getElementById(elementId);
-    if (!el) return;
-    let i = 0;
-    const interval = setInterval(() => {
-        if (i < steps.length) {
-            el.textContent = steps[i++];
-        } else {
-            clearInterval(interval);
-        }
-    }, 600);
-}
-
-// =========================
-// RADAR
-// =========================
-function drawRadar(breakdown) {
-    const canvas = document.getElementById('radarChart');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-
-    const scores = [
-        breakdown.gaze,
-        breakdown.lip_sync,
-        breakdown.voice,
-        breakdown.emotion,
-        breakdown.behavioral
-    ].map(v => (v || 0) * 100);
-
-    if (radarChart) radarChart.destroy();
-
-    radarChart = new Chart(ctx, {
-        type: 'radar',
-        data: {
-            labels: ['Gaze', 'Lip Sync', 'Voice', 'Emotion', 'Behavior'],
-            datasets: [{
-                label: 'AI Analysis',
-                data: scores,
-                backgroundColor: 'rgba(99, 179, 237, 0.15)',
-                borderColor: 'rgba(99, 179, 237, 0.9)',
-                pointBackgroundColor: 'rgba(99, 179, 237, 1)',
-                borderWidth: 2
-            }]
-        },
-        options: {
-            scales: {
-                r: {
-                    min: 0,
-                    max: 100,
-                    ticks: { color: '#94a3b8', stepSize: 25, backdropColor: 'transparent' },
-                    grid: { color: 'rgba(148,163,184,0.15)' },
-                    pointLabels: { color: '#e2e8f0', font: { size: 12 } }
-                }
-            },
-            plugins: {
-                legend: { labels: { color: '#e2e8f0' } }
-            }
-        }
-    });
-}

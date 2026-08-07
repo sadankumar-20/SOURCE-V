@@ -270,6 +270,65 @@ function cycleLoadingText(elId) {
     }, 900);
 }
 
+// ---- MEDIA PREVIEW RENDERER ----
+function renderMediaPreview(wrapperId, metaId, file, verdict = null) {
+    const wrapper = document.getElementById(wrapperId);
+    const meta = document.getElementById(metaId);
+    if (!wrapper) return;
+
+    if (wrapper.dataset.objectUrl) {
+        URL.revokeObjectURL(wrapper.dataset.objectUrl);
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    wrapper.dataset.objectUrl = objectUrl;
+
+    const fileType = file.type || '';
+    const fileName = file.name || 'Uploaded File';
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    const ext = fileName.split('.').pop().toLowerCase();
+
+    if (meta) {
+        meta.innerHTML = `<span class="media-type-badge">${ext.toUpperCase()}</span> <span class="media-size">${fileSizeMB} MB</span>`;
+    }
+
+    let borderClass = 'preview-border-default';
+    if (verdict === 'FAKE') borderClass = 'preview-border-fake';
+    else if (verdict === 'REAL') borderClass = 'preview-border-real';
+
+    if (fileType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext)) {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass}">
+                <img src="${objectUrl}" alt="${fileName}" class="preview-media-img" />
+                <div class="media-overlay-badge"><i class="fa-solid fa-image"></i> ${fileName}</div>
+            </div>
+        `;
+    } else if (fileType.startsWith('video/') || ['mp4', 'webm', 'mov', 'avi', 'mkv'].includes(ext)) {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass}">
+                <video src="${objectUrl}" controls autoplay muted loop class="preview-media-video"></video>
+                <div class="media-overlay-badge"><i class="fa-solid fa-video"></i> ${fileName}</div>
+            </div>
+        `;
+    } else if (fileType.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'aac'].includes(ext)) {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass} audio-wrapper">
+                <div class="audio-visual-icon"><i class="fa-solid fa-music"></i></div>
+                <div class="audio-info">
+                    <div class="audio-filename">${fileName}</div>
+                    <audio src="${objectUrl}" controls class="preview-media-audio"></audio>
+                </div>
+            </div>
+        `;
+    } else {
+        wrapper.innerHTML = `
+            <div class="media-element-wrapper ${borderClass}">
+                <div class="generic-file-preview"><i class="fa-solid fa-file"></i> ${fileName}</div>
+            </div>
+        `;
+    }
+}
+
 // ---- SCANNER ----
 function setupScanner() {
     const loading = document.getElementById('scanner-loading');
@@ -310,6 +369,9 @@ function setupScanner() {
             const tb = document.getElementById('res-scan-threat');
             tb.innerText = data.threat_prediction;
             tb.className = 'threat-badge ' + data.threat_prediction;
+
+            // Media Visual Preview
+            renderMediaPreview('scanner-media-wrapper', 'scanner-media-meta', file, data.detection_verdict);
 
             // Module breakdown bars
             setModuleBar('bar-gaze', 'res-gaze', data.breakdown.gaze);
@@ -360,6 +422,10 @@ function setupVerifier() {
             const data = await response.json();
             document.getElementById('res-verify-hash').innerText = data.sha256_hash;
             document.getElementById('res-verify-phash').innerText = data.perceptual_hash || 'N/A';
+
+            // Media Visual Preview
+            renderMediaPreview('verifier-media-wrapper', 'verifier-media-meta', file);
+
             verificationsCount++;
             document.getElementById('stat-verifications').innerText = verificationsCount;
             loading.classList.add('hidden');
@@ -393,6 +459,9 @@ function setupSimulator() {
             rb.className = 'threat-badge ' + data.future_attack_risk;
             document.getElementById('res-sim-type').innerText = data.predicted_attack_type;
 
+            // Media Visual Preview
+            renderMediaPreview('simulator-media-wrapper', 'simulator-media-meta', file, data.future_attack_risk === 'HIGH' ? 'FAKE' : 'REAL');
+
             setTimeout(() => {
                 const pct = (data.confidence * 100).toFixed(1);
                 document.getElementById('res-sim-confidence-bar').style.width = pct + '%';
@@ -408,3 +477,4 @@ function setupSimulator() {
         }
     });
 }
+

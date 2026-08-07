@@ -37,7 +37,7 @@ class FaceExtractor:
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         self.face_cascade = cv2.CascadeClassifier(cascade_path)
 
-    def crop_face(self, frame: np.ndarray, target_size=(224, 224)) -> np.ndarray:
+    def crop_face(self, frame: np.ndarray, target_size=(112, 112)) -> np.ndarray:
         """Return a face crop resized to target_size, or centre-crop if no face found."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(
@@ -97,7 +97,9 @@ class FastDetector:
 
     MOBILENET_PATH = "models/mobilenet_deepfake.pt"
     GAZE_LSTM_PATH = "models/gaze_lstm_best.pt"
+    HISTORY_PATH   = "models/training_history.json"
     N_FRAMES       = 16   # frames sampled per video
+    MIN_VAL_ACC    = 0.70  # minimum validation accuracy to trust the MobileNet model
 
     def __init__(self, device: str = "cpu"):
         self.device = torch.device(device)
@@ -107,8 +109,27 @@ class FastDetector:
         self._load_model()
 
     # ─────────────────────────────────────────────────
+    def _check_model_accuracy(self) -> float:
+        """Read training history and return best validation accuracy."""
+        try:
+            import json
+            if os.path.exists(self.HISTORY_PATH):
+                with open(self.HISTORY_PATH) as f:
+                    history = json.load(f)
+                val_accs = history.get("val_acc", [])
+                if val_accs:
+                    return max(val_accs)
+        except Exception:
+            pass
+        return 0.0
+
     def _load_model(self):
-        if os.path.exists(self.MOBILENET_PATH):
+        # Check if the trained model meets minimum accuracy threshold
+        best_acc = self._check_model_accuracy()
+        if best_acc > 0:
+            print(f"[FastDetector] Model best val_acc = {best_acc:.3f} (threshold: {self.MIN_VAL_ACC})")
+
+        if os.path.exists(self.MOBILENET_PATH) and best_acc >= self.MIN_VAL_ACC:
             try:
                 m = build_mobilenet(num_classes=2)
                 state = torch.load(self.MOBILENET_PATH, map_location=self.device)
@@ -116,13 +137,16 @@ class FastDetector:
                 m.to(self.device).eval()
                 self.model = m
                 self.model_type = "mobilenet"
-                print("[FastDetector] MobileNetV2 model loaded OK")
+                print("[FastDetector] MobileNetV2 model loaded OK (accuracy meets threshold)")
                 return
             except Exception as e:
                 print(f"[FastDetector] MobileNet load failed: {e}")
+        elif os.path.exists(self.MOBILENET_PATH) and best_acc < self.MIN_VAL_ACC:
+            print(f"[FastDetector] MobileNet model exists but accuracy ({best_acc:.1%}) is below threshold ({self.MIN_VAL_ACC:.0%})")
+            print("[FastDetector] Using heuristic analyzer instead (retrain with more data/epochs to upgrade)")
 
-        # Fallback — use GazeLSTM heuristic scorer
-        print("[FastDetector] Using heuristic gaze scorer (run quick_train.py to upgrade)")
+        # Fallback — use pixel-analysis heuristic scorer
+        print("[FastDetector] Using heuristic pixel-analysis scorer")
         self.model_type = "heuristic"
 
     # ─────────────────────────────────────────────────
@@ -157,55 +181,147 @@ class FastDetector:
     # ─────────────────────────────────────────────────
     def _score_heuristic(self, frames: list, filename: str) -> tuple:
         """
-        Heuristic analyzer that uses visual texture/frequency cues.
-        Better than random — uses actual pixel analysis.
+        Advanced heuristic analyzer using GAN-specific forensic signals.
+        Detects both low-quality manipulations AND high-quality AI-generated faces.
         """
         scores = []
-        for frame in frames:
+        face_hits = 0
+        for idx, frame in enumerate(frames):
             crop = self.extractor.crop_face(frame)
-            # Keep gray as uint8 for OpenCV compat, then convert to float for math
-            gray_u8 = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)          # uint8
-            gray    = gray_u8.astype(np.float32)
 
-            # Laplacian high-frequency residuals (use CV_32F — compatible with all OpenCV builds)
-            lap = cv2.Laplacian(gray_u8, cv2.CV_32F)
+            # Track face detection
+            gray_u8 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.extractor.face_cascade.detectMultiScale(
+                gray_u8, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+            )
+            if len(faces) > 0:
+                face_hits += 1
+
+            # Work on the face crop
+            crop_gray_u8 = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            crop_gray = crop_gray_u8.astype(np.float32)
+            h, w = crop_gray.shape
+
+            # ─── SIGNAL 1: FFT Spectral Analysis ───
+            # GANs leave periodic frequency-domain artifacts
+            fft = np.fft.fft2(crop_gray)
+            fft_shift = np.fft.fftshift(fft)
+            magnitude = np.log1p(np.abs(fft_shift))
+
+            cy, cx = h // 2, w // 2
+            max_radius = min(cy, cx)
+            radial_profile = []
+            for rad in range(1, max_radius):
+                Y, X = np.ogrid[:h, :w]
+                ring = ((X - cx)**2 + (Y - cy)**2 >= (rad-1)**2) & \
+                       ((X - cx)**2 + (Y - cy)**2 < rad**2)
+                ring_vals = magnitude[ring]
+                if len(ring_vals) > 0:
+                    radial_profile.append(float(np.mean(ring_vals)))
+
+            if len(radial_profile) > 10:
+                rp = np.array(radial_profile)
+                rp_diffs = np.diff(rp)
+                rp_smoothness = 1.0 / (1.0 + np.std(rp_diffs))
+                mid_start = len(rp) // 3
+                hf_ratio = np.mean(rp[mid_start:]) / (np.mean(rp[:mid_start]) + 1e-8)
+                spectral_raw = rp_smoothness * 3.0 + hf_ratio
+            else:
+                spectral_raw = 2.0  # neutral
+
+            # ─── SIGNAL 2: Face Bilateral Symmetry ───
+            left_half = crop_gray[:, :w//2]
+            right_half = cv2.flip(crop_gray[:, w//2:], 1)
+            min_w2 = min(left_half.shape[1], right_half.shape[1])
+            left_half = left_half[:, :min_w2]
+            right_half = right_half[:, :min_w2]
+            symmetry_diff = float(np.mean(np.abs(left_half - right_half)))
+
+            # ─── SIGNAL 3: Skin Smoothness ───
+            margin_y, margin_x = h // 5, w // 5
+            inner_face = crop_gray[margin_y:h-margin_y, margin_x:w-margin_x]
+            if inner_face.size > 0:
+                inner_f = inner_face.astype(np.float32)
+                local_mean = cv2.blur(inner_f, (5, 5))
+                local_sq_mean = cv2.blur(inner_f ** 2, (5, 5))
+                local_var = np.maximum(local_sq_mean - local_mean ** 2, 0)
+                avg_local_var = float(np.mean(local_var))
+            else:
+                avg_local_var = 100.0
+
+            # ─── SIGNAL 4: Laplacian texture variance ───
+            lap = cv2.Laplacian(crop_gray_u8, cv2.CV_32F)
             lap_var = float(np.var(lap))
 
-            # DCT energy in 8x8 blocks (JPEG-like frequency analysis)
-            dct_scores = []
-            h, w = gray.shape
-            for r in range(0, h - 8, 8):
-                for c in range(0, w - 8, 8):
-                    block = gray[r:r+8, c:c+8]
-                    dct = cv2.dct(block)
-                    ac_energy = np.sum(dct[1:, 1:] ** 2)
-                    dct_scores.append(ac_energy)
+            # ─── SIGNAL 5: Noise residual ───
+            blurred = cv2.GaussianBlur(crop_gray, (3, 3), 0)
+            noise_residual = crop_gray - blurred.astype(np.float32)
+            noise_std = float(np.std(noise_residual))
 
-            dct_mean = np.mean(dct_scores) if dct_scores else 0.0
+            # ─── SIGNAL 6: Colour kurtosis spread ───
+            b_ch, g_ch, r_ch_arr = cv2.split(crop.astype(np.float32))
+            def _kurt(arr):
+                arr = arr.flatten()
+                m, s = np.mean(arr), np.std(arr)
+                if s < 1e-8: return 0.0
+                return float(np.mean(((arr - m) / s) ** 4) - 3.0)
+            try:
+                kurt_spread = float(np.std([_kurt(r_ch_arr), _kurt(g_ch_arr), _kurt(b_ch)]))
+            except Exception:
+                kurt_spread = 1.5
 
-            # Colour channel correlation (deepfakes often have unnatural colour)
-            b, g, r_ch = cv2.split(crop.astype(np.float32))
-            rg_corr = float(np.corrcoef(r_ch.flatten(), g.flatten())[0, 1])
-            rb_corr = float(np.corrcoef(r_ch.flatten(), b.flatten())[0, 1])
+            # ─── SIGNAL 7: Micro-texture uniformity (block Laplacian CV) ───
+            block_size = max(h // 4, 4)
+            block_vars = []
+            for rb in range(0, h - block_size, block_size):
+                for cb in range(0, w - block_size, block_size):
+                    block = lap[rb:rb+block_size, cb:cb+block_size]
+                    block_vars.append(float(np.var(block)))
+            if block_vars:
+                bv = np.array(block_vars)
+                texture_cv = float(np.std(bv) / (np.mean(bv) + 1e-8))
+            else:
+                texture_cv = 0.7
 
-            # Noise residual via median filter
-            blurred = cv2.medianBlur(crop, 3)
-            residual = cv2.absdiff(crop, blurred).astype(np.float32)
-            noise_std = float(np.std(residual))
+            # ═══════════════════════════════════════════════
+            # SCORING: Convert raw signals to fake probability
+            # Real images: high symmetry_diff, high local_var, high noise, high lap_var,
+            #              high kurt_spread, high texture_cv
+            # Fake images: low symmetry_diff, low local_var, low noise, low lap_var,
+            #              low kurt_spread, low texture_cv, high spectral_raw
+            # ═══════════════════════════════════════════════
 
-            # Combine into a heuristic score
-            # High lap_var + specific DCT profile → more likely real
-            # Low correlation + high noise → more likely fake
+            # Each signal → [0, 1] fake probability with wide dynamic range
+            s1_spectral   = float(np.clip((spectral_raw - 1.5) / 2.5, 0, 1))
+            s2_symmetry   = float(np.clip(1.0 - symmetry_diff / 25.0, 0, 1))  # <10 = very symmetric = AI
+            s3_smoothness = float(np.clip(1.0 - avg_local_var / 150.0, 0, 1))  # <50 = smooth = AI
+            s4_texture    = float(np.clip(1.0 - lap_var / 800.0, 0, 1))        # <200 = flat = AI
+            s5_noise      = float(np.clip(1.0 - noise_std / 6.0, 0, 1))        # <2 = no noise = AI
+            s6_kurt       = float(np.clip(1.0 - kurt_spread / 2.5, 0, 1))      # <0.5 = uniform = AI
+            s7_tex_unif   = float(np.clip(1.0 - texture_cv / 1.2, 0, 1))       # <0.4 = uniform = AI
+
+            # Debug logging (first frame only)
+            if idx == 0:
+                print(f"  [Heuristic Debug] spectral_raw={spectral_raw:.3f} symmetry_diff={symmetry_diff:.1f} "
+                      f"local_var={avg_local_var:.1f} lap_var={lap_var:.0f} noise_std={noise_std:.2f} "
+                      f"kurt_spread={kurt_spread:.2f} texture_cv={texture_cv:.2f}")
+                print(f"  [Signals] S1={s1_spectral:.3f} S2={s2_symmetry:.3f} S3={s3_smoothness:.3f} "
+                      f"S4={s4_texture:.3f} S5={s5_noise:.3f} S6={s6_kurt:.3f} S7={s7_tex_unif:.3f}")
+
             fake_score = float(np.clip(
-                0.3 * (1.0 - np.clip(lap_var / 800.0, 0, 1)) +   # low texture → fake
-                0.3 * (1.0 - abs(rg_corr)) +                       # low colour corr → fake
-                0.2 * (noise_std / 20.0) +                         # noise → fake
-                0.2 * np.clip(dct_mean / 5000.0, 0, 1),           # high freq → fake
+                0.20 * s1_spectral +     # FFT spectral
+                0.18 * s2_symmetry +     # Face symmetry
+                0.17 * s3_smoothness +   # Skin smoothness
+                0.15 * s4_texture +      # Laplacian texture
+                0.12 * s5_noise +        # Noise absence
+                0.10 * s6_kurt +         # Colour kurtosis
+                0.08 * s7_tex_unif,      # Texture uniformity
                 0, 1
             ))
             scores.append(fake_score)
 
-        return scores, 0.5
+        face_ratio = face_hits / max(len(frames), 1)
+        return scores, face_ratio
 
     # ─────────────────────────────────────────────────
     def _extract_module_scores(self, frames: list, filename: str, fake_scores: list) -> dict:
@@ -269,10 +385,10 @@ class FastDetector:
 
         final_score = float(np.mean(fake_scores))
 
-        # Verdict thresholds (calibrated for deepfake data)
-        if final_score > 0.52:
+        # Verdict thresholds (calibrated for heuristic/model outputs)
+        if final_score > 0.55:
             verdict = "FAKE"
-        elif final_score < 0.40:
+        elif final_score < 0.42:
             verdict = "REAL"
         else:
             verdict = "UNCERTAIN"
